@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Threading;
 using DryIoc;
 using DryIoc.Microsoft.DependencyInjection;
 using Microsoft.AspNetCore.Hosting;
@@ -33,7 +34,7 @@ namespace NzbDrone.Host
     {
         private static readonly Logger Logger = NzbDroneLogger.GetLogger(typeof(Bootstrap));
 
-        public static readonly List<string> ASSEMBLIES = new List<string>
+        public static readonly List<string> ASSEMBLIES = new()
         {
             "Sonarr.Host",
             "Sonarr.Core",
@@ -58,66 +59,86 @@ namespace NzbDrone.Host
                 var appMode = GetApplicationMode(startupContext);
                 var config = GetConfiguration(startupContext);
 
-                switch (appMode)
+                bool shouldRestart;
+
+                do
                 {
-                    case ApplicationModes.Service:
-                    {
-                        Logger.Debug("Service selected");
+                    shouldRestart = false;
 
-                        CreateConsoleHostBuilder(args, startupContext).UseWindowsService().Build().Run();
-                        break;
+                    switch (appMode)
+                    {
+                        case ApplicationModes.Service:
+                            {
+                                Logger.Debug("Service selected");
+                                var host = CreateConsoleHostBuilder(args, startupContext)
+                                    .UseWindowsService()
+                                    .Build();
+
+                                shouldRestart = RunWithRestartCheck(host);
+                                break;
+                            }
+
+                        case ApplicationModes.Interactive:
+                            {
+                                Logger.Debug(trayCallback != null ? "Tray selected" : "Console selected");
+                                var builder = CreateConsoleHostBuilder(args, startupContext);
+
+                                if (trayCallback != null)
+                                {
+                                    trayCallback(builder);
+                                }
+
+                                var host = builder.Build();
+                                shouldRestart = RunWithRestartCheck(host);
+                                break;
+                            }
+
+                        // Utility mode
+                        default:
+                            {
+                                new HostBuilder()
+                                    .UseServiceProviderFactory(new DryIocServiceProviderFactory(new Container(rules => rules.WithNzbDroneRules())))
+                                    .ConfigureContainer<IContainer>(c =>
+                                    {
+                                        c.AutoAddServices(Bootstrap.ASSEMBLIES)
+                                            .AddNzbDroneLogger()
+                                            .AddDatabase()
+                                            .AddStartupContext(startupContext)
+                                            .Resolve<UtilityModeRouter>()
+                                            .Route(appMode);
+
+                                        if (config.GetValue(nameof(ConfigFileProvider.LogDbEnabled), true))
+                                        {
+                                            c.AddLogDatabase();
+                                        }
+                                        else
+                                        {
+                                            c.AddDummyLogDatabase();
+                                        }
+                                    })
+                                    .ConfigureServices(services =>
+                                    {
+                                        services.Configure<PostgresOptions>(config.GetSection("Sonarr:Postgres"));
+                                        services.Configure<AppOptions>(config.GetSection("Sonarr:App"));
+                                        services.Configure<AuthOptions>(config.GetSection("Sonarr:Auth"));
+                                        services.Configure<ServerOptions>(config.GetSection("Sonarr:Server"));
+                                        services.Configure<LogOptions>(config.GetSection("Sonarr:Log"));
+                                        services.Configure<UpdateOptions>(config.GetSection("Sonarr:Update"));
+                                    }).Build();
+
+                                break;
+                            }
                     }
 
-                    case ApplicationModes.Interactive:
+                    if (shouldRestart)
                     {
-                        Logger.Debug(trayCallback != null ? "Tray selected" : "Console selected");
-                        var builder = CreateConsoleHostBuilder(args, startupContext);
-
-                        if (trayCallback != null)
-                        {
-                            trayCallback(builder);
-                        }
-
-                        builder.Build().Run();
-                        break;
-                    }
-
-                    // Utility mode
-                    default:
-                    {
-                        new HostBuilder()
-                            .UseServiceProviderFactory(new DryIocServiceProviderFactory(new Container(rules => rules.WithNzbDroneRules())))
-                            .ConfigureContainer<IContainer>(c =>
-                            {
-                                c.AutoAddServices(Bootstrap.ASSEMBLIES)
-                                    .AddNzbDroneLogger()
-                                    .AddDatabase()
-                                    .AddStartupContext(startupContext)
-                                    .Resolve<UtilityModeRouter>()
-                                    .Route(appMode);
-
-                                if (config.GetValue(nameof(ConfigFileProvider.LogDbEnabled), true))
-                                {
-                                    c.AddLogDatabase();
-                                }
-                                else
-                                {
-                                    c.AddDummyLogDatabase();
-                                }
-                            })
-                            .ConfigureServices(services =>
-                            {
-                                services.Configure<PostgresOptions>(config.GetSection("Sonarr:Postgres"));
-                                services.Configure<AppOptions>(config.GetSection("Sonarr:App"));
-                                services.Configure<AuthOptions>(config.GetSection("Sonarr:Auth"));
-                                services.Configure<ServerOptions>(config.GetSection("Sonarr:Server"));
-                                services.Configure<LogOptions>(config.GetSection("Sonarr:Log"));
-                                services.Configure<UpdateOptions>(config.GetSection("Sonarr:Update"));
-                            }).Build();
-
-                        break;
+                        Logger.Info("Restarting now");
+                        Thread.Sleep(1000);
                     }
                 }
+                while (shouldRestart);
+
+                Logger.Info("Sonarr has shut down completely");
             }
             catch (InvalidConfigFileException ex)
             {
@@ -309,6 +330,21 @@ namespace NzbDrone.Host
             }
 
             return certificate;
+        }
+
+        private static bool RunWithRestartCheck(IHost host)
+        {
+            var shouldRestart = false;
+
+            var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
+            lifetime.ApplicationStopped.Register(() =>
+            {
+                var runtimeInfo = host.Services.GetRequiredService<IRuntimeInfo>();
+                shouldRestart = runtimeInfo.RestartPending;
+            });
+
+            host.Run();
+            return shouldRestart;
         }
     }
 }
