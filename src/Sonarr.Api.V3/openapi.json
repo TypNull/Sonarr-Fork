@@ -12097,7 +12097,13 @@
           "isWindows": {
             "type": "boolean"
           },
+          "isContainerized": {
+            "type": "boolean"
+          },
           "isDocker": {
+            "type": "boolean"
+          },
+          "isPodman": {
             "type": "boolean"
           },
           "mode": {
