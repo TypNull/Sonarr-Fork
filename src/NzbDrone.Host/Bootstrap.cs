@@ -130,6 +130,7 @@ namespace NzbDrone.Host
                 if (shouldRestart)
                 {
                     Logger.Info("Restarting now");
+                    NzbDroneLogger.ResetAllTargets(startupContext, false, true);
                     Thread.Sleep(1000);
                 }
             }
