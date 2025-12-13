@@ -52,7 +52,7 @@ function PageHeaderActionsMenu(props: PageHeaderActionsMenuProps) {
             {translate('Restart')}
           </MenuItem>
 
-          {!isContainerized && (
+          {isContainerized ? null : (
             <MenuItem onPress={handleShutdownPress}>
               <Icon
                 className={styles.itemIcon}
